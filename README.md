@@ -243,7 +243,7 @@ Istnieją różne metody sprawdzenia czy wiadomość dotarła, może to być
 - CRC
 - Hashe
 
-Niestety nasze zakłócenia są dosyć wysokie, więc żadna metoda nie dam nam 100% pewności, że wykryliśmy błąd. Ale hash da największe prawdopodobieństwo, więc to go użyję. Użyję w tym przypadku MD5. MD5 nie jest już kryptograficznie bezpieczną funkcją hashującą, ale do wykrycia błędu będzie całkowicie wystarczająca. Szansa na wygenerowanie 2 takich samych hashów wynosi 1.47*10^-29, więc można powiedzieć, że jest pomijalna.
+Niestety nasze zakłócenia są dosyć wysokie, więc żadna metoda nie da nam 100% pewności, że wykryliśmy błąd. Ale hash da największe prawdopodobieństwo, więc to go użyję. Użyję w tym przypadku MD5. MD5 nie jest już kryptograficznie bezpieczną funkcją hashującą, ale do wykrycia błędu będzie całkowicie wystarczająca. Szansa na wygenerowanie 2 takich samych hashy wynosi 1.47*10^-29, więc można powiedzieć, że jest pomijalna.
 
 Hash dodamy do początku wiadomości, MD5 ma 16 bajtów, więc pierwsze 16 bajtów wiadomości to będzie hash.
 
@@ -299,7 +299,7 @@ function parsePacket(rawPacket) {
 ```
 
 
-Możemy teraz zmodyfikować metodę `processMessage`, żeby wyglądała tak:
+Możemy teraz zmodyfikować metodę `processMessage`, żeby wykorzystywała naszą funkcję `parsePacket`:
 ```js
 processMessage(msg, rinfo) {
     const packet = parsePacket(msg);
@@ -311,10 +311,10 @@ processMessage(msg, rinfo) {
     this.messageCallbacks.forEach(c => c(packet.message, rinfo));
 }
 ```
-Póki co w przypadku niepoprawnej wiadomości wypiszemy informację o tym na konsolce, ale za chwilkę to zmienimy.
+W przypadku niepoprawnej wiadomości wypiszemy informację o tym na konsolce.
 Możemy teraz zrestartować proces klienta 2, oraz uruchomić klienta 1, żeby zobaczyć czy nasza weryfikacja działa.
 
-Zweryfikujmy czy nasza metoda weryfikacji zadziała dla poprawnych wiadomości i na chwilę zmieńmy linijkę:
+Zweryfikujmy czy nasza metoda weryfikacji zadziała dla poprawnych wiadomości, zmieniając na chwilę linjkę w pliku `server.mjs`:
 ```js
 const corruptionPropability = 0.1;
 ```
@@ -330,7 +330,7 @@ Dodaliśmy tą metodą do wiadomości 16 bajtów, więc mamy 16 bajtów nadmiaru
 ## Potwierdzenia otrzymania poprawnej odpowiedzi i wysyłanie wiadomości ponownie
 Mamy już sposób wykrycia błędnej wiadomości, teraz musimy coś z tym zrobić.
 
-Pierwszy raz projektuję swój własny protokół, więc miałem tutaj zagwozdkę, w jaki sposób to możnaby zrobić. Miałem pomysł z numerowaniem pakietów, przechowywaniem listy pakietów, które zostały wysłane i wysyłanie poprawne na prośbę klienta. Jest to jednak strasznie skomplikowane, więc stwierdziłem, że sprawdzę jak jest to realizowane przez znane protokoły. Padło na chyban najprostszy protokół do przesyłania danych, TFTP.
+Pierwszy raz projektuję swój własny protokół, więc miałem tutaj zagwozdkę, w jaki sposób to możnaby zrobić. Miałem pomysł z numerowaniem pakietów, przechowywaniem listy pakietów, które zostały wysłane i wysyłanie poprawne na prośbę klienta. Jest to jednak strasznie skomplikowane, więc stwierdziłem, że sprawdzę jak jest to realizowane przez znane protokoły. Padło na chyba najprostszy protokół do przesyłania danych, TFTP.
 
 Jak możemy przeczytać w [RFC 1350 - THE TFTP PROTOCOL (REVISION 2)](https://www.rfc-editor.org/rfc/rfc1350):
 > Each data packet contains one block of
@@ -352,7 +352,7 @@ Genialne w swojej prostocie, ale zamiast odbiorca wysyłać pakiet po timeoucie,
 |         Message          |
 |--------------------------|
 ```
-I ustamy typy:
+I ustalmy typy:
 - `1` - wiadomość
 - `2` - potwierdzenie
 
@@ -509,7 +509,7 @@ RECEIVED INVALID PACKET!
 RECEIVED INVALID PACKET!
 RECEIVED INVALID PACKET!
 ```
-Wyświetlane w nieskończoność, a poprawny pakiet nie chce nadejść. Tyle roboty na marne, dalej nie możemy przesłać poprawnego pakietu. Dlaczego? Oto wyjaśnienie:
+Wyświetlane w nieskończoność, a poprawny pakiet nie chce nadejść. Tyle roboty, a dalej nie możemy przesłać poprawnego pakietu. Dlaczego?! Oto wyjaśnienie:
 
 Nasz serwer ma 10% szans na zamianę każdego bajtu na losowy. To znaczy, że nasza szansa na powodzenie wynosi (0.9)^n, gdzie n jest rozmiarem naszego pakietu. Obecnie jest to rozmiar wiadomości + 17 bajtów. Oto kilka przykładów szansy na pomyślnie przesłanie wiadomości o różnych rozmiarach:
 * 5 bajtów - 59%
