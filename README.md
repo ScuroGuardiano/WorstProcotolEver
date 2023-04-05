@@ -232,3 +232,98 @@ Teraz za każdym razem jak w trzecim oknie wpiszemy `node client1.mjs` zostanie 
 Oto co otrzymujemy na drugim kliencie:
 ![Wiadomość z błędami](screens/screen1.png)
 Naszym celem jest teraz zmodyfikowanie metod `processMessage` oraz `send` w klasie `WPSocket`, tak aby klient 2 dostał ładną, bezbłędną inwokację.
+
+
+## Wykrywanie przekłamań
+Żeby uznać pakiet za błędny musimy wiedzieć, że jest on błędny. Ludzkim okiem potrafimy ocenić, że wiadomość nie jest taka jaka być powinna, ale komputer musi mieć mechanizm do sprawdzenia tego.
+
+Istnieją różne metody sprawdzenia czy wiadomość dotarła, może to być
+- Sprawdzanie parzystości bitów
+- Suma kontrolna
+- CRC
+- Hashe
+
+Niestety nasze zakłócenia są dosyć wysokie, więc żadna metoda nie dam nam 100% pewności, że wykryliśmy błąd. Ale hash da największe prawdopodobieństwo, więc to go użyję. Użyję w tym przypadku MD5. MD5 nie jest już kryptograficznie bezpieczną funkcją hashującą, ale do wykrycia błędu będzie całkowicie wystarczająca. Szansa na wygenerowanie 2 takich samych hashów wynosi 1.47*10^-29, więc można powiedzieć, że jest pomijalna.
+
+Hash dodamy do początku wiadomości, MD5 ma 16 bajtów, więc pierwsze 16 bajtów wiadomości to będzie hash.
+
+Nasza wysłana wiadomość będzie więc wyglądała tak:
+```
+|------------------------|
+| 128 bit MD5 | Message  |
+|------------------------|
+```
+
+Zaimplementujmy zatem hashowanie wiadomości i dodawanie hasha na jej początek. Dodajmy sobie funkcję w naszym pliku `wpsocket.mjs` o nazwie `addHashToMessage`, a w niej:
+```js
+function addHashToMessage(message) {
+    const hash = crypto.createHash('md5').update(message).digest();
+    return Buffer.concat([hash, message]);
+}
+```
+
+A następnie wykorzystajmy tę funkcję do wysłania wiadomości, zmodyfikujmy metodę `send`:
+```js
+send(msg, targetPort, targetAddress) {
+    // Musimy zamienić wiadomość na bufor, czyli reprezetację bajtową.
+    // Gdyż za pomocą metody `addHashToMessage` wykonujemy operację na buforach.
+    if (!(msg instanceof Buffer)) {
+        msg = Buffer.from(msg);
+    }
+    const messageWithHash = addHashToMessage(msg);
+    this.internalSocket.send(messageWithHash, targetPort, targetAddress);
+}
+```
+
+Dodajmy funkcję weryfikującą poprawność pakietu o nazwie `verifyPacket`, której przekażemy hash oraz zawartość pakietu.
+```js
+function verifyPacket(hash, data) {
+    // Obliczamy hash danych w pakiecie
+    const hashOfData = crypto.createHash('md5').update(data).digest();
+    // I porównujemy je z hashem z pakietu
+    // Funkcja `compare` zwraca 0 jeżeli bufory są równe.
+    return hashOfData.compare(hash) === 0;
+}
+```
+
+Dodajmy jeszcze funkcję `parsePacket`, która zwróci nam obiekt zawierający wiadomość oraz informację czy pakiet prawidłowy:
+```js
+function parsePacket(rawPacket) {
+    if (rawPacket.length < 16) {
+        return { invalid: true }
+    }
+    const hash = rawPacket.subarray(0, 16);
+    const message = rawPacket.subarray(16);
+    return { hash, message };
+}
+```
+
+
+Możemy teraz zmodyfikować metodę `processMessage`, żeby wyglądała tak:
+```js
+processMessage(msg, rinfo) {
+    const packet = parsePacket(msg);
+    if (!packet.valid) {
+        console.log("RECEIVED INVALID PACKET!");
+        return;
+    }
+
+    this.messageCallbacks.forEach(c => c(packet.message, rinfo));
+}
+```
+Póki co w przypadku niepoprawnej wiadomości wypiszemy informację o tym na konsolce, ale za chwilkę to zmienimy.
+Możemy teraz zrestartować proces klienta 2, oraz uruchomić klienta 1, żeby zobaczyć czy nasza weryfikacja działa.
+
+Zweryfikujmy czy nasza metoda weryfikacji zadziała dla poprawnych wiadomości i na chwilę zmieńmy linijkę:
+```js
+const corruptionPropability = 0.1;
+```
+w pliku `server.mjs`, na
+```js
+const corruptionPropability = 0.0;
+```
+Zrestartujmy serwer, uruchomny na nowo clienta 1 i powiniśmy zobaczyć u klienta 2, że wiadomość dotarła.
+> PAMIĘTAJ O PRZYWRÓCENIE PARAMETRU `corruptionPropability` NA `0.1`!!!
+
+Dodaliśmy tą metodą do wiadomości 16 bajtów, więc mamy 16 bajtów nadmiaru póki co.
+

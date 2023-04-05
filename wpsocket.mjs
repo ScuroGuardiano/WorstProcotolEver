@@ -1,4 +1,43 @@
 import dgram from "node:dgram";
+import crypto from "node:crypto";
+
+/**
+ * 
+ * @param {Buffer} message 
+ */
+function addHashToMessage(message) {
+    const hash = crypto.createHash('md5').update(message).digest();
+    return Buffer.concat([hash, message]);
+}
+
+/**
+ * 
+ * @param {Buffer} rawPacket 
+ */
+function parsePacket(rawPacket) {
+    if (rawPacket.length < 16) {
+        return { valid: false }
+    }
+    const hash = rawPacket.subarray(0, 16);
+    const message = rawPacket.subarray(16);
+    return {
+        message,
+        valid: verifyPacket(hash, message)
+    }
+}
+
+/**
+ * 
+ * @param {Buffer} hash 
+ * @param {Buffer} data 
+ */
+function verifyPacket(hash, data) {
+    // Obliczamy hash danych w pakiecie
+    const hashOfData = crypto.createHash('md5').update(data).digest();
+    // I porównujemy je z hashem z pakietu
+    // Funkcja `compare` zwraca 0 jeżeli bufory są równe.
+    return hashOfData.compare(hash) === 0;
+}
 
 export class WPSocket {
     /**
@@ -7,7 +46,13 @@ export class WPSocket {
      * @param {dgram.RemoteInfo} rinfo 
      */
     processMessage(msg, rinfo) {
-        this.messageCallbacks.forEach(c => c(msg, rinfo));
+        const packet = parsePacket(msg);
+        if (!packet.valid) {
+            console.log("RECEIVED INVALID PACKET!");
+            return;
+        }
+
+        this.messageCallbacks.forEach(c => c(packet.message, rinfo));
     }
 
     /**
@@ -17,7 +62,13 @@ export class WPSocket {
      * @param {string} targetAddress 
      */
     send(msg, targetPort, targetAddress) {
-        this.internalSocket.send(msg, targetPort, targetAddress);
+        // Musimy zamienić wiadomość na bufor, czyli reprezetację bajtową.
+        // Gdyż za pomocą metody `addHashToMessage` wykonujemy operację na buforach.
+        if (!(msg instanceof Buffer)) {
+            msg = Buffer.from(msg);
+        }
+        const messageWithHash = addHashToMessage(msg);
+        this.internalSocket.send(messageWithHash, targetPort, targetAddress);
     }
     
     internalSocket = dgram.createSocket('udp4');

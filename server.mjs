@@ -3,7 +3,7 @@ const server = dgram.createSocket('udp4');
 
 const client1 = "127.0.0.1:1999";
 const client2 = "127.0.0.1:2001";
-const corruptionPropability = 0.1;
+const corruptionPropability = 0.0;
 
 /**
  * 
