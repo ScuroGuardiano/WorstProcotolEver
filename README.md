@@ -327,3 +327,195 @@ Zrestartujmy serwer, uruchomny na nowo clienta 1 i powiniśmy zobaczyć u klient
 
 Dodaliśmy tą metodą do wiadomości 16 bajtów, więc mamy 16 bajtów nadmiaru póki co.
 
+## Potwierdzenia otrzymania poprawnej odpowiedzi i wysyłanie wiadomości ponownie
+Mamy już sposób wykrycia błędnej wiadomości, teraz musimy coś z tym zrobić.
+
+Pierwszy raz projektuję swój własny protokół, więc miałem tutaj zagwozdkę, w jaki sposób to możnaby zrobić. Miałem pomysł z numerowaniem pakietów, przechowywaniem listy pakietów, które zostały wysłane i wysyłanie poprawne na prośbę klienta. Jest to jednak strasznie skomplikowane, więc stwierdziłem, że sprawdzę jak jest to realizowane przez znane protokoły. Padło na chyban najprostszy protokół do przesyłania danych, TFTP.
+
+Jak możemy przeczytać w [RFC 1350 - THE TFTP PROTOCOL (REVISION 2)](https://www.rfc-editor.org/rfc/rfc1350):
+> Each data packet contains one block of
+   data, and must be acknowledged by an acknowledgment packet before the
+   next packet can be sent. [...]  
+> If a packet gets lost in the
+   network, the intended recipient will timeout and may retransmit his
+   last packet (which may be data or an acknowledgment), thus causing
+   the sender of the lost packet to retransmit that lost packet.  The
+   sender has to keep just one packet on hand for retransmission, since
+   the lock step acknowledgment guarantees that all older packets have
+   been received.
+
+Genialne w swojej prostocie, ale zamiast odbiorca wysyłać pakiet po timeoucie, to nasz nadawca będzie timeoutował jeżeli nie dostanie odpowiedzi potwierdzającej. Jeżeli nasz odbiorca dostanie drugi taki sam poprawny pakiet, to go odrzuci (możemy sprawdzić po hashu). Musimy tylko dodać typ pakietu do naszej wiadomości, który zawrzemy w 1 bajcie i damy go zaraz po hashu! Więc nasz pakiet będzie wyglądał tak:
+```
+|--------------------------|
+| 128 bit MD5 | 8 bit type |
+|--------------------------|
+|         Message          |
+|--------------------------|
+```
+I ustamy typy:
+- `1` - wiadomość
+- `2` - potwierdzenie
+
+W przypadku innego typu uznamy wiadomość za błędną. A i jedna ważna sprawa, teraz przy liczeniu i weryfikacji hashu będziemy musieli uwzględnić nasz typ wiadomości. Zmodyfikujmy więc najpierw naszą klasę `WPSocket` dodając pola `sendQueue`, `lastSentRawPacket` oraz `timeoutTime`, który ustawimy na 1000ms:
+
+```js
+export class WPSocket {
+    sendQueue = [];
+    lastSentRawPacket = null;
+    timeoutTime = 1000;
+    // Reszta kodu
+```
+
+Utwórzmy sobie teraz obiekt pomocniczy `PacketType` wyglądający tak:
+```js
+const PacketType = {
+    MSG: 1, // wiadomość
+    ACK: 2  // potwierdzenie
+}
+```
+
+i funkcję `createPacket`. Będzie ona przyjmowała typ pakietu i opcjonalną wiadomość, a zwróci nam bufor z gotowym do wysłania pakietem.
+```js
+function createPacket(type, message) {
+    // Sprawdzenie czy typ jest poprawny
+    if (!Object.values(PacketType).includes(type)) {
+        throw new Error(`Type ${type} is not allowed!`);
+    }
+    const packetType = Buffer.alloc(1, type);
+
+    switch (type) {
+        case PacketType.ACK:
+            return addHashToMessage(packetType);
+        case PacketType.MSG:
+            message = message ?? ""; // Jeżeli wiadomość jest nullem to damy pustego stringa.
+            // Musimy zamienić wiadomość na bufor, czyli reprezetację bajtową.
+            // Gdyż niżej operujemy na buforach
+            if (!(message instanceof Buffer)) {
+                message = Buffer.from(message);
+            }
+
+            const packet = Buffer.concat([packetType, message]);
+            return addHashToMessage(packet);
+    }
+}
+```
+Teraz musimy wykorzystać tę funkcję w naszej metodzie `send`, która będzie dużo prostsza, ale tylko przez chwilę ;):
+```js
+send(msg, targetPort, targetAddress) {
+    const packet = createPacket(PacketType.MSG, msg);
+    this.internalSocket.send(packet, targetPort, targetAddress);
+    this.lastSentRawPacket = packet;
+}
+```
+
+Musimy teraz zmodyfikować funkcję `parsePacket`, żeby uwzględniała nasze nowe pole w pakiecie:
+```js
+function parsePacket(rawPacket) {
+    if (rawPacket.length < 17) {
+        return { valid: false }
+    }
+    const hash = rawPacket.subarray(0, 16);
+    
+    const restOfPacket = rawPacket.subarray(16);
+    const type = restOfPacket.subarray(0, 1);
+    const message = restOfPacket.subarray(1);
+
+    return {
+        message,
+        type: type.readUint8(),
+        valid: verifyPacket(hash, restOfPacket)
+    }
+}
+```
+
+Teraz można się zająć wysyłaniem potwierdzeń. Utwórzmy sobie metodę `sendAck` przyjmującą jako parametr adres i port na który wysłać potwierdzenie:
+```js
+sendAck(targetPort, targetAddress) {
+    const packet = createPacket(PacketType.ACK);
+    this.internalSocket.send(packet, targetPort, targetAddress);
+    this.lastSentRawPacket = packet;
+}
+```
+Mamy tutaj trochę powtarzającego się kodu, ale nie przejmujmy się tym na razie. Zrobimy za chwilę z tym porządek, obiecuję!
+
+Musimy teraz zmodyfikować metodę `processMessage`, żeby wysyłała potwierdzenie w momencie otrzymania poprawnej wiadomości. Dodajemy na końcu metody `processMessage` po prostu taką linijkę:
+```js
+this.sendAck(rinfo.port, rinfo.address);
+```
+
+Teraz tylko zaimplementujmy ponowne wysyłanie wiadomości. Ale chwila, mamy powtarzający się kod, o którym wspomniałem wyżej. Naprawny to! Stwórzmy sobie metodę `sendPacket`, która będzie przyjmowała gotowy pakiet, dane adresowe oraz to czy pakiet powinien być wysyłany aż do otrzymania potwierdzenia. Dodajmy do niej ponowne wysyłanie pakietu co określony timeoutTime. Musimy dodatkowo dodać sobie funkcję, do której przypiszemy identyfikator naszego interwału. Następnie w metodach `send` oraz `sendAck` możemy wykorzystać metodę `sendPacket`. Więc dodajemy pole `interval` do naszej klasy:
+```js
+export class WPSocket {
+    sendQueue = [];
+    lastSentRawPacket = null;
+    timeoutTime = 1000;
+    interval = null;
+    // Reszta kodu
+```
+
+I modyfikujemy nasze metody wysyłające:
+
+```js
+send(msg, targetPort, targetAddress) {
+    const packet = createPacket(PacketType.MSG, msg);
+    this.sendPacket(packet, targetPort, targetAddress, true);
+}
+
+sendAck(targetPort, targetAddress) {
+    const packet = createPacket(PacketType.ACK, msg);
+    this.sendPacket(packet, targetPort, targetAddress, false);
+}
+
+sendPacket(packet, targetPort, targetAddress, retryUntilAcknowledged) {
+    this.internalSocket.send(packet, targetPort, targetAddress);
+    this.lastSentRawPacket = packet;
+    if (retryUntilAcknowledged) {
+        this.interval = setInterval(() => {
+            this.sendPacket(packet, targetPort, targetAddress);
+        }, this.timeoutTime);
+    }
+}
+```
+To wymagać może trochę wyjaśnienia, atrybut `retryUntilAcknowledged` jest nam potrzebny aby zdecydować czy wysyłać ponownie wiadomość czy nie. Ma to znaczenie, gdyż chcemy ponownie wysyłać wiadomość w przypadku braku potwierdzenia, ale nie chcemy wysyłać ponownie potwierdzenia, bo kiedy mielibyśmy przestać? Otrzymując potwierdzenie potwierdzenia? I wtedy wysłać potwierdzenie potwierdzenia potwierdzenia? ;p
+
+Została modyfikacja `processMessage`, tak, żeby w momencie otrzymania potwierdzenia interwał był czyszczony. No i warto by różnie reagować na różne typy pakietu:
+```js
+processMessage(msg, rinfo) {
+    const packet = parsePacket(msg);
+    if (!packet.valid) {
+        console.log("RECEIVED INVALID PACKET!");
+        return;
+    }
+
+    switch (packet.type) {
+        case PacketType.ACK:
+            if (this.interval) {
+                clearInterval(this.interval);
+            }
+            break;
+        case PacketType.MSG:
+            this.messageCallbacks.forEach(c => c(packet.message, rinfo));
+            this.sendAck(rinfo.port, rinfo.address);
+            break;
+        default:
+            console.warn(`Packet type ${packet.type} is not supported.`);
+    }
+}
+```
+
+Teraz możemy wszystko przetestować. Niestety jedyne co widzimy to:
+```
+RECEIVED INVALID PACKET!
+RECEIVED INVALID PACKET!
+RECEIVED INVALID PACKET!
+```
+Wyświetlane w nieskończoność, a poprawny pakiet nie chce nadejść. Tyle roboty na marne, dalej nie możemy przesłać poprawnego pakietu. Dlaczego? Oto wyjaśnienie:
+
+Nasz serwer ma 10% szans na zamianę każdego bajtu na losowy. To znaczy, że nasza szansa na powodzenie wynosi (0.9)^n, gdzie n jest rozmiarem naszego pakietu. Obecnie jest to rozmiar wiadomości + 17 bajtów. Oto kilka przykładów szansy na pomyślnie przesłanie wiadomości o różnych rozmiarach:
+* 5 bajtów - 59%
+* 10 bajtów - 35%
+* 13 znaków, łącznie 30 bajtów - 4% szans na pomyślny transfer
+* 100 znaków, łącznie 117 bajtów - 0.00044% szans na pomyślny transfer
+* 50000 znaków, łącznie 50017 bajtów - (2.22 × 10^-2287)%, można rzec, że jest to niemożliwe
+
+Na szczęście mamy pod ręką jeszcze kilka innych mechanizmów! A póki co nasza nadmiarowość wynosi 17 bajtów.

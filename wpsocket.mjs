@@ -1,6 +1,11 @@
 import dgram from "node:dgram";
 import crypto from "node:crypto";
 
+const PacketType = {
+    MSG: 1, // wiadomość
+    ACK: 2  // potwierdzenie
+}
+
 /**
  * 
  * @param {Buffer} message 
@@ -15,14 +20,19 @@ function addHashToMessage(message) {
  * @param {Buffer} rawPacket 
  */
 function parsePacket(rawPacket) {
-    if (rawPacket.length < 16) {
+    if (rawPacket.length < 17) {
         return { valid: false }
     }
     const hash = rawPacket.subarray(0, 16);
-    const message = rawPacket.subarray(16);
+    
+    const restOfPacket = rawPacket.subarray(16);
+    const type = restOfPacket.subarray(0, 1);
+    const message = restOfPacket.subarray(1);
+
     return {
         message,
-        valid: verifyPacket(hash, message)
+        type: type.readUint8(),
+        valid: verifyPacket(hash, restOfPacket)
     }
 }
 
@@ -39,7 +49,40 @@ function verifyPacket(hash, data) {
     return hashOfData.compare(hash) === 0;
 }
 
+/**
+ * 
+ * @param {1 | 2} type 
+ * @param {(Buffer | string)?} message 
+ */
+function createPacket(type, message) {
+    // Sprawdzenie czy typ jest poprawny
+    if (!Object.values(PacketType).includes(type)) {
+        throw new Error(`Type ${type} is not allowed!`);
+    }
+    const packetType = Buffer.alloc(1, type);
+
+    switch (type) {
+        case PacketType.ACK:
+            return addHashToMessage(packetType);
+        case PacketType.MSG:
+            message = message ?? ""; // Jeżeli wiadomość jest nullem to damy pustego stringa.
+            // Musimy zamienić wiadomość na bufor, czyli reprezetację bajtową.
+            // Gdyż niżej operujemy na buforach
+            if (!(message instanceof Buffer)) {
+                message = Buffer.from(message);
+            }
+
+            const packet = Buffer.concat([packetType, message]);
+            return addHashToMessage(packet);
+    }
+}
+
 export class WPSocket {
+    sendQueue = [];
+    lastSentRawPacket = null;
+    timeoutTime = 1000;
+    interval = null;
+
     /**
      * 
      * @param {Buffer} msg 
@@ -52,23 +95,58 @@ export class WPSocket {
             return;
         }
 
-        this.messageCallbacks.forEach(c => c(packet.message, rinfo));
+        switch (packet.type) {
+            case PacketType.ACK:
+                if (this.interval) {
+                    clearInterval(this.interval);
+                }
+                break;
+            case PacketType.MSG:
+                this.messageCallbacks.forEach(c => c(packet.message, rinfo));
+                this.sendAck(rinfo.port, rinfo.address);
+                break;
+            default:
+                console.log(packet.type);
+                console.warn(`Packet type ${packet.type} is not supported.`);
+        }
     }
 
     /**
      * 
-     * @param {Buffer} msg 
+     * @param {Buffer | string} msg 
      * @param {number} targetPort 
      * @param {string} targetAddress 
      */
     send(msg, targetPort, targetAddress) {
-        // Musimy zamienić wiadomość na bufor, czyli reprezetację bajtową.
-        // Gdyż za pomocą metody `addHashToMessage` wykonujemy operację na buforach.
-        if (!(msg instanceof Buffer)) {
-            msg = Buffer.from(msg);
+        const packet = createPacket(PacketType.MSG, msg);
+        this.sendPacket(packet, targetPort, targetAddress, true);
+    }
+
+    /**
+     * 
+     * @param {number} targetPort 
+     * @param {string} targetAddress 
+     */
+    sendAck(targetPort, targetAddress) {
+        const packet = createPacket(PacketType.ACK);
+        this.sendPacket(packet, targetPort, targetAddress, false);
+    }
+
+    /**
+     * 
+     * @param {Buffer} packet 
+     * @param {number} targetPort 
+     * @param {string} targetAddress 
+     * @param {boolean} retryUntilAcknowledged
+     */
+    sendPacket(packet, targetPort, targetAddress, retryUntilAcknowledged) {
+        this.internalSocket.send(packet, targetPort, targetAddress);
+        this.lastSentRawPacket = packet;
+        if (retryUntilAcknowledged) {
+            this.interval = setInterval(() => {
+                this.sendPacket(packet, targetPort, targetAddress);
+            }, this.timeoutTime);
         }
-        const messageWithHash = addHashToMessage(msg);
-        this.internalSocket.send(messageWithHash, targetPort, targetAddress);
     }
     
     internalSocket = dgram.createSocket('udp4');
