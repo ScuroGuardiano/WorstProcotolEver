@@ -9,7 +9,7 @@ flowchart LR
     A[Klient 1]-->B[Serwer]-->|Możliwie uszkodzona wiadomość|C[Klient 2]
 ```
 
-Wykorzystując różne techniki, takie jak:
+Musimy znaleźć sposób na przesłanie danych poprawnie pomimo tych zakłóceń wykorzystując różne techniki, takie jak:
 - Sumy kontrolne
 - Retransmisje oraz potwierdzenia
 - Dzielenie informacji na mniejsze bloki
