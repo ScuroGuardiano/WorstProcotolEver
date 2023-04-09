@@ -1,5 +1,6 @@
 import dgram from "node:dgram";
 import crypto from "node:crypto";
+import { hammingDecode, hammingEncode } from "./hamming.mjs";
 
 const PacketType = {
     MSG: 1, // wiadomość
@@ -20,19 +21,30 @@ function addHashToMessage(message) {
  * @param {Buffer} rawPacket 
  */
 function parsePacket(rawPacket) {
-    if (rawPacket.length < 17) {
+    if (rawPacket.length < 18) {
         return { valid: false }
     }
-    const hash = rawPacket.subarray(0, 16);
+    const { decoded, valid: hammingValid } = hammingDecode(rawPacket);
+
+    const hash = decoded.subarray(0, 16);
+    const paddingSize = decoded.readUint8(17);
     
-    const restOfPacket = rawPacket.subarray(16);
+    let end = decoded.byteLength - paddingSize;
+
+    if (end < 18) {
+        // Wykonujemy to aby uniknąć jakiegoś wyjątku w przypadku
+        // przekłamania `paddingSize` nie wyłapanego przez kodowania Hamminga
+        end = 18;
+    }
+    const restOfPacket = decoded.subarray(16, end);
     const type = restOfPacket.subarray(0, 1);
-    const message = restOfPacket.subarray(1);
+
+    const message = restOfPacket.subarray(2);
 
     return {
         message,
         type: type.readUint8(),
-        valid: verifyPacket(hash, restOfPacket)
+        valid: hammingValid && verifyPacket(hash, restOfPacket)
     }
 }
 
@@ -60,10 +72,17 @@ function createPacket(type, message) {
         throw new Error(`Type ${type} is not allowed!`);
     }
     const packetType = Buffer.alloc(1, type);
+    const paddingSize = Buffer.alloc(1, 0);
+    
+    let packet;
 
     switch (type) {
-        case PacketType.ACK:
-            return addHashToMessage(packetType);
+        case PacketType.ACK: {
+            paddingSize.writeUint8((1 + 16) % 11);
+            const payload = Buffer.concat([packetType, paddingSize]);
+            packet = addHashToMessage(payload);
+            break;
+        }
         case PacketType.MSG:
             message = message ?? ""; // Jeżeli wiadomość jest nullem to damy pustego stringa.
             // Musimy zamienić wiadomość na bufor, czyli reprezetację bajtową.
@@ -72,9 +91,14 @@ function createPacket(type, message) {
                 message = Buffer.from(message);
             }
 
-            const packet = Buffer.concat([packetType, message]);
-            return addHashToMessage(packet);
+            paddingSize.writeUint8(11 - (paddingSize.byteLength + packetType.byteLength + 16 + message.byteLength) % 11);
+
+            const payload = Buffer.concat([packetType, paddingSize, message]);
+            packet = addHashToMessage(payload);
+            break;
     }
+
+    return hammingEncode(packet);
 }
 
 export class WPSocket {

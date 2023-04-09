@@ -519,3 +519,386 @@ Nasz serwer ma 10% szans na zamianę każdego bajtu na losowy. To znaczy, że na
 * 50000 znaków, łącznie 50017 bajtów - (2.22 × 10^-2287)%, można rzec, że jest to niemożliwe
 
 Na szczęście mamy pod ręką jeszcze kilka innych mechanizmów! A póki co nasza nadmiarowość wynosi 17 bajtów.
+
+## Korekcja błędów - kodowanie Hamminga
+Istnieją sposoby na korekcję błędów, które są w stanie naprawić błędy w informacji. Jednym z takich sposobów jest kodowanie Hamminga. Nie będę tutaj tłumaczył dokładnie czym jest kodowanie Hamminga, bo ten artykuł urósł by do potężnych rozmiarów, a i tak już jest długi. Na szczęście 3Blue1Brown ma genialne filmy na youtube właśnie o tym kodowaniu:
+1. [How to send a self-correcting message (Hamming codes)](https://youtu.be/X8jsijhllIA)
+2. [Hamming codes part 2, the elegance of it all](https://youtu.be/b3NxrZOu_CE)
+
+Obejrzyj proszę je wszystkie zanim przystąpisz do dalszej implementacji naszego prokotołu, inaczej nie zrozumiesz o co w tym wszystkim chodzi. A tak w skrócie:  
+Wyjaśnię to później, obejrzyj filmiki xD
+
+Jeżeli masz już zrozumienie jak działa kodowanie Hamminga to utwórz plik `hamming.mjs` i wklej do niego tę implementację:
+
+```js
+/**
+ * Użyłem tutaj generatora, jednakże jeżeli Twój język nie ma generatorów
+ * to możesz po prostu tablicę bajtów zamienić na tablicę bitów i ją zwrócić.
+ * 
+ * @param {Buffer} buf
+ */
+export function* bufBitIterator(buf) {
+    for (let i = 0; i < buf.byteLength; i++) {
+        const byte = buf.readUint8(i);
+        for (let j = 0; j < 8; j++) {
+            yield (byte >> j) & 1;
+        }
+    }
+}
+
+/**
+ * Funkcja, która zamieni tablicę bitów na tablicę bajtów, w przypadku node.js-a
+ * tablicą bajtów jest Buffer lub UInt8Array.
+ * 
+ * @param {BitArray} arr
+ */
+export function bitArrayToBuf(arr) {
+    const buffer = Buffer.alloc(Math.ceil(arr.length / 8), 0);
+    for (let i = 0; i < arr.length; i++) {
+        const bit = arr[i];
+        buffer[Math.floor(i / 8)] = buffer[Math.floor(i / 8)] | (bit << (i % 8));
+    }
+    return buffer;
+}
+
+// Uzywamy tutaj hamminga {15, 11}.
+// To oznacza, że wiadomość jest kodowana w 11 bajtach, są ustawiane na specyficznych pozycjach
+// w 16 bitowym bloku, które wypisałem tutaj.
+export const hamming15_11BitPositions = [3, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15];
+
+/**
+ * Funkcja obliczająca bity parzystości w 16 bitowym bloku.
+ * @param {number} word  
+ */
+export function calculateParityBits(word) {
+    let res = 0;
+    let posNeededToTurn = 0;
+    let singleParityBit = 0;
+
+    // Każdy bit parzystości z kodowania hamminga znajduje się na pozycji, która
+    // jest potęgą dwójki. Robiąc operację xor na wszystkich pozycjach 16 bitowego
+    // bloku jako rezultat dostaniemy 4 bitową liczbę binarną, którą wykorzystamy niżej.
+    for (let i = 0; i < 11; i++) {
+        const bit = word >> hamming15_11BitPositions[i] & 1;
+        singleParityBit ^= bit; // Do obliczeń bitu parzystości, wytłumaczenie niżej
+        if (bit) {
+            posNeededToTurn ^= hamming15_11BitPositions[i];
+        }
+    }
+    
+    // Otrzymaliśmy z operacji wyżej 4 bitową liczbę.
+    // Każdy bit tej liczby oznacza czy na danej pozycji powinniśmy ustawić bit parzystości
+    // Przykładowo dla liczby 1010 musimy ustawić bit parzystości na pozycji 0010 oraz 1000
+    // czyli na 2 oraz 8.
+    for (let i = 0; i < 4; i++) {
+        const bit = (posNeededToTurn >> i) & 1;
+        singleParityBit ^= bit; // Do obliczeń bitu parzystości, wytłumaczenie niżej
+        if (bit) {
+            res |= 1 << 2 ** i;
+        }
+    }
+
+    // Obliczamy bit parzystości dokonując operacji xor na wszystkich bitach
+    // Najlepiej będzie wyjaśnić na przykładzie dlaczego to działa:
+    // 1 xor 1 xor 1 = 1
+    // 1 xor 1 xor 0 = 0
+    // Przy nieparzystej liczbie bitów xor zawsze da nam wynik 1, a przy parzystej da nam 0
+    // Więc możemy ten wynik ustawić jako bit parzystości
+    res |= singleParityBit;
+
+    return res;
+}
+
+/**
+ * Zakoduje wiadomość przy użyciu rozszerzonego kodowania hamminga {15, 11}.
+ * 
+ * Kodowanie odbywa się przy użyciu 11 bajtowych bloków wiadomości, jeżeli wiadomość nie jest
+ * wielokrotnością 11 bajtów, to reszta zostanie wypełniona zerami.
+ * 
+ * Jest to użyte w celu ułatwienia.
+ * 
+ * @param {Buffer} buf 
+ */
+export function hammingEncode(buf) {
+    const _128BitBlocks = Math.ceil(buf.byteLength / 11);
+    const temp = Buffer.alloc(_128BitBlocks * 11, 0);
+    buf.copy(temp);
+    const encoded = Buffer.alloc(_128BitBlocks * 16, 0);
+
+    let word = 0;
+    let i = 0;
+    for (let bit of bufBitIterator(temp)) {
+        if (i !== 0 && i % 11 === 0) {
+            word |= calculateParityBits(word);
+            encoded.writeUint16LE(word, i / 11 * 2 - 2);
+            word = 0;
+        }
+        word |= bit << hamming15_11BitPositions[i % 11];
+
+        i++;
+    }
+    word |= calculateParityBits(word);
+    encoded.writeUint16LE(word, i / 11 * 2 - 2);
+
+    return encoded;
+}
+
+/**
+ * Zweryfikuje wiadomość i poprawi jednobitowy błąd. W przypadku 2 bitowego błędu
+ * zwróci informację, że nie udało się zdekodować wiadomości
+ * 
+ * @param {number} word 
+ * @returns { { unrecovableError: boolean, word: number } }
+ */
+export function hammingErrorCheck(word) {
+    let errorPos = 0;
+    let parityBit = 0;
+    for (let i = 0; i < 16; i++) {
+        const bit = (word >> i) & 1;
+        parityBit ^= bit; // xor our friend <3
+        if (bit) {
+            // Teraz coś super cool o kodowaniu hamminga
+            // Jeżeli wykonamy operację xor na pozycjach, na których wartość bitu
+            // wynosi 1, to w przypadku jednobitowego błędu otrzymamy dokładną pozycję
+            // Na której bit został przekłamany...
+            errorPos ^= i;
+        }
+    }
+
+    if (errorPos) {
+        // ... więc, możemy to po prostu naprawić
+        // ale napierw sprawdzimy parzystość, robimy tu xor-a z jedynką,
+        // ponieważ mieliśmy przekłamany jeden bit, więc żeby parzystość była poprawna
+        // musimy ustawić go na 1
+        parityBit ^= 1;
+        if (parityBit !== 0) {
+            // Jeżeli teraz parzystość się nie zgadza, to mamy co najmniej 2 bitowe
+            // przekłamanie. Tego już nie naprawimy, niestety. Więc zwracamy błąd i nie zmodyfikowane
+            // słowo wiadomości.
+            return { unrecovableError: true, word };
+        }
+
+        // Flipujemy bita na pozycji błędu ^^
+        word ^= 1 << errorPos;
+    }
+
+    return { unrecovableError: false, word };
+}
+
+/**
+ * Zdekoduje wiadomość zakodowaną przez kodowanie hamminga.
+ * 
+ * @param {Buffer} buf 
+ */
+export function hammingDecode(buf) {
+    if (buf.byteLength % 16 !== 0) {
+        throw new Error("Invalid buffer, it must contain blocks of 16 bytes length");
+    }
+
+    const _128BitBlocks = buf.byteLength / 16;
+    let decoded = Buffer.alloc(11 * _128BitBlocks, 0);
+    
+    let valid = true;
+
+    for (let i = 0; i < _128BitBlocks; i++) {
+        const bits = [];
+        const block = buf.subarray(i * 16, i * 16 + 16);
+        for (let j = 0; j < 8; j++) {
+            let word = block.readUint16LE(j * 2);
+            const errorFix = hammingErrorCheck(word);
+            if (errorFix.unrecovableError) {
+                console.log("UNRECOVERABLE ERROR OCCURED!");
+                valid = false;
+            }
+            word = errorFix.word;
+
+            for (let k = 0; k < 11; k++) {
+                bits.push((word >> hamming15_11BitPositions[k]) & 1)
+            }
+        }
+        const b = bitArrayToBuf(bits);
+        b.copy(decoded, i * 11);
+    }
+    
+    return { valid, decoded };
+}
+```
+
+Parę wyjaśnień do tego kodu:
+### ***XOR*** (`^`) najpotężniejszą binarną operacją
+Używam bardzo dużo tutaj operacji `xor`, przed wszystkim kodowanie Hamminga to wykorzystuje, a drugi powód użycia operacji `xor` to zamiania bitu. Jeżeli zrobimy `x xor 1`, gdzie x to 0 lub 1, to zamienimy wartość x z 0 na 1 albo odwrotnie. `1 xor 1 = 0`, `0 xor 1 = 1`.
+
+### Przesunięcia bitowe, ***AND*** (`&`) oraz ***OR*** (`|`)
+Za pomocą przesunięć bitowych oraz operatora binarnego `and` możemy "wyciągnąć" poszczególne bity z liczby. Powiedzmy, że mamy liczbę `11`, której binarna reprezentacja to `1011`. Wyciągnijmy teraz jej bity, za pomocą operacji binarnych
+```
+1011 & 1                 = 1
+1011 >> 1 = 101, 101 & 1 = 1
+101 >> 1 = 10, 10 & 1    = 0
+10 >> 1 = 1, 1 & 1       = 1
+```
+I mamy bity naszej liczby w odwrotnej kolejności.
+
+Druga sprawa to ustawianie bitów na odpowiednich pozycjach. Możemy to zrobić za pomocą operacji ***OR***. Powiedzmy, że chcemy ustawić bit `1` na pozycji `5`. Możemy wtedy zrobić `x &= 1 << 5`, zobaczmy:
+```
+1 << 5 = 10000
+0000 0000 | 10000 = 0001 0000
+                       ^
+                    Bit na 5 pozycji
+```
+
+W ten sposób zrealizowaliśmy kodowanie Hamminga. Wykorzystajmy je teraz w naszym protokole! Importujemy funkcję z pliku `hamming.mjs`:
+```js
+import { hammingDecode, hammingEncode } from "./hamming.mjs";
+```
+A później modyfikujemy funkcję z tworzeniem i parsowaniem pakietu:
+
+```js
+function parsePacket(rawPacket) {
+    if (rawPacket.length < 17) {
+        return { valid: false }
+    }
+
+    const { decoded, valid: hammingValid } = hammingDecode(rawPacket);
+
+    const hash = decoded.subarray(0, 16);
+    
+    const restOfPacket = decoded.subarray(16);
+    const type = restOfPacket.subarray(0, 1);
+    const message = restOfPacket.subarray(1);
+
+    return {
+        message,
+        type: type.readUint8(),
+        valid: hammingValid && verifyPacket(hash, restOfPacket)
+    }
+}
+
+function createPacket(type, message) {
+    // Sprawdzenie czy typ jest poprawny
+    if (!Object.values(PacketType).includes(type)) {
+        throw new Error(`Type ${type} is not allowed!`);
+    }
+    const packetType = Buffer.alloc(1, type);
+    
+    let packet;
+
+    switch (type) {
+        case PacketType.ACK:
+            packet = addHashToMessage(packetType);
+            break;
+        case PacketType.MSG:
+            message = message ?? ""; // Jeżeli wiadomość jest nullem to damy pustego stringa.
+            // Musimy zamienić wiadomość na bufor, czyli reprezetację bajtową.
+            // Gdyż niżej operujemy na buforach
+            if (!(message instanceof Buffer)) {
+                message = Buffer.from(message);
+            }
+
+            const payload = Buffer.concat([packetType, message]);
+            packet = addHashToMessage(payload);
+            break;
+    }
+
+    return hammingEncode(packet);
+}
+```
+
+Możemy teraz przetestować znowu nasz kod i...  
+Okazuje się, że dalej nie możemy przesłać wiadomości, dlaczego tak się dzieje?
+
+Kod Hamminga jest w stanie naprawić jeden bit wiadomości, a my jak dostaniemy przekłamanie to całego bajtu. Z tym sobie kodowanie Hamminga nie poradzi. Możemy jednak ustawić w sprytny sposób bity, tak żeby kodowania Hamminga dało sobie z tym radę. I właśnie to zrobimy w następnej sekcji.
+
+Ale teraz sprawdźmy jeszcze czy działa nasz kod dla poprawnej wiadomości bez zakłóceń. W tym celu znowu ustawmy prawdopodobieństwo zakłóceń serwera na 0, odpalmy wszystko ponownie i...
+```
+RECEIVED INVALID PACKET!
+RECEIVED INVALID PACKET!
+RECEIVED INVALID PACKET!
+RECEIVED INVALID PACKET!
+RECEIVED INVALID PACKET!
+```
+Dlaczego tak się dzieje? Dlatego że kodujemy wiadomość w blokach po 11 bajtów (popatrz komentarze w kodzie), a jak wiadomość nie jest wielokrotnością 11 bajtów to dodajemy do niej zera, aż będzie miała 11 bajtów, jednakże funkcja hashująca MD5 jest wyczulona na długość wiadomości. Moglibyśmy dodać długość przesyłanej wiadomości, ale możemy dodać to wydajniej. Po prostu dodajmy ile zakodowaliśmy nadmiarowych bajtów, które zignorujemy. Nasz pakiet przed zakodowaniem będzie wyglądał wtedy tak:
+```
+|--------------------------|
+| 128 bit MD5 | 8 bit type |
+|--------------------------|
+|    8-bit Padding Size    |
+|--------------------------|
+|         Message          |
+|--------------------------|
+```
+Pamiętajmy, żeby uwzględnić rozmiar paddingu do funkcji hashującej, czyli dodać `1` do rozmiaru pakietu:
+```js
+function createPacket(type, message) {
+    // Sprawdzenie czy typ jest poprawny
+    if (!Object.values(PacketType).includes(type)) {
+        throw new Error(`Type ${type} is not allowed!`);
+    }
+    const packetType = Buffer.alloc(1, type);
+    const paddingSize = Buffer.alloc(1, 0);
+    
+    let packet;
+
+    switch (type) {
+        case PacketType.ACK: {
+            paddingSize.writeUint8((1 + 16) % 11);
+            const payload = Buffer.concat([packetType, paddingSize]);
+            packet = addHashToMessage(payload);
+            break;
+        }
+        case PacketType.MSG:
+            message = message ?? ""; // Jeżeli wiadomość jest nullem to damy pustego stringa.
+            // Musimy zamienić wiadomość na bufor, czyli reprezetację bajtową.
+            // Gdyż niżej operujemy na buforach
+            if (!(message instanceof Buffer)) {
+                message = Buffer.from(message);
+            }
+
+            paddingSize.writeUint8(11 - (paddingSize.byteLength + packetType.byteLength + 16 + message.byteLength) % 11);
+
+            const payload = Buffer.concat([packetType, paddingSize, message]);
+            packet = addHashToMessage(payload);
+            break;
+    }
+
+    return hammingEncode(packet);
+}
+```
+
+Teraz wiemy ile zignorować przy parsowaniu pakietu, więc zaimplementujmy to:
+```js
+/**
+ * 
+ * @param {Buffer} rawPacket 
+ */
+function parsePacket(rawPacket) {
+    if (rawPacket.length < 18) {
+        return { valid: false }
+    }
+    const { decoded, valid: hammingValid } = hammingDecode(rawPacket);
+
+    const hash = decoded.subarray(0, 16);
+    const paddingSize = decoded.readUint8(17);
+    
+    let end = decoded.byteLength - paddingSize;
+
+    if (end < 18) {
+        // Wykonujemy to aby uniknąć jakiegoś wyjątku w przypadku
+        // przekłamania `paddingSize` nie wyłapanego przez kodowania Hamminga
+        end = 18;
+    }
+    const restOfPacket = decoded.subarray(16, end);
+    const type = restOfPacket.subarray(0, 1);
+
+    const message = restOfPacket.subarray(2);
+
+    return {
+        message,
+        type: type.readUint8(),
+        valid: hammingValid && verifyPacket(hash, restOfPacket)
+    }
+}
+```
+
+Teraz przy sprawdzeniu wszystko powinno działać, ustaw zakłócenia serwera do poprzedniego poziomu, na 0.1.
+
+## Odpowiednie ustawienie bitów
