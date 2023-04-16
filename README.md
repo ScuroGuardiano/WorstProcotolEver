@@ -540,7 +540,7 @@ Jeżeli masz już zrozumienie jak działa kodowanie Hamminga to utwórz plik `ha
 export function* bufBitIterator(buf) {
     for (let i = 0; i < buf.byteLength; i++) {
         const byte = buf.readUint8(i);
-        for (let j = 0; j < 8; j++) {
+        for (let j = 7; j >= 0; j--) {
             yield (byte >> j) & 1;
         }
     }
@@ -556,7 +556,7 @@ export function bitArrayToBuf(arr) {
     const buffer = Buffer.alloc(Math.ceil(arr.length / 8), 0);
     for (let i = 0; i < arr.length; i++) {
         const bit = arr[i];
-        buffer[Math.floor(i / 8)] = buffer[Math.floor(i / 8)] | (bit << (i % 8));
+        buffer[Math.floor(i / 8)] = buffer[Math.floor(i / 8)] | (bit << 7 - (i % 8));
     }
     return buffer;
 }
@@ -902,3 +902,120 @@ function parsePacket(rawPacket) {
 Teraz przy sprawdzeniu wszystko powinno działać, ustaw zakłócenia serwera do poprzedniego poziomu, na 0.1.
 
 ## Odpowiednie ustawienie bitów
+Aby zwiększyć odporność kodowania hamming możemy przestawić bity tak, żeby przekłamanie 1 bajtu uszkadzało po 1 bicie w każdym z 8 bloków kodowania Hamminga.
+
+Straciłem siły do robienia tego tutoriala, więc w skrócie, biorę nasz 128 bitowy blok, bo w takich kodujemy wiadomości. Ten blok zawiera osiem 16 bitowych bloków kodu Hamminga. Idealnie, mamy 16 bajtów, po 8 bitów każdy. Oraz 8 bloków hamminga, po 16 bitów każdy, więc możemy umieści każdy bit bloku hamminga w innym bajcie.
+
+Ciężko mi to wytłumaczyć używając samego tekstu, może kiedyś zrobię filmik o tym, chociaż moja wiedza jest słaba w tym temacie. W każdym razie, spróbuję wytłumaczyć jak najlepiej potrafię. Więc mamy 8 bloków po 16 bitów każdy i chcemy to zakodować w tej samej długości czyli 16 bajtach. Możemy zatem zakodować pierszy bit pierwszego bloku hamminga w pierwszym bicie pierwszego bajta finalnej wiadomości, drugi bit pierwszego bloku hamming w pierwszym bicie drugiego bajta finalnej wiadomości i tak dalej.
+
+Oznaczmy sobie to na cyferkach, niech:
+* H(n, b) będzie bitem, gdzie n oznacza numer bloku hamminga, a b number bitu tego bloku
+* F(n, b) będzie finalnie zakodowaną wiadomością, gdzie n oznacza numer bajtu wiadomości, a b number bitu tego bajtu
+Nasza wiadomość będzie wtedy wyglądała tak:
+```
+Indeksujemy od zera :)
+F(0, 0) = H(0, 0)
+F(1, 0) = H(0, 1)
+F(x, 0) = H(0, x)
+F(0, 1) = H(1, 0)
+F(1, 1) = H(1, 1)
+F(x, 1) = H(1, x)
+F(x, y) = H(y, x)
+```
+
+Zaimplementujmy to w kodzie:
+```js
+// Pamiętaj o zaimportowaniu bufBitIterator z pliku `hamming.mjs`!
+
+/**
+ * 
+ * @param {Buffer} buf 
+ */
+ function interlate128BitBlocks(buf) {
+    if (buf.byteLength === 0) {
+        return buf;
+    }
+
+    if (buf.byteLength % 16 !== 0) {
+        throw new Error("Buffer in interlate128BitBlocks must have size that is multiple of 16 bytes!");
+    }
+
+    const outputBuffer = Buffer.alloc(buf.byteLength);
+    let currentBlock = outputBuffer.subarray(0, 16);
+
+    let i = 0;
+    for(const bit of bufBitIterator(buf)) {
+        let byteNumber = i % 16;
+        let bitNumber = Math.floor(i / 16) % 8;
+        currentBlock[byteNumber] |= bit << bitNumber;
+
+        i++;
+        if (i !== 0 && i % 128 === 0) {
+            currentBlock = outputBuffer.subarray(i / 8, i / 8 + 16);
+        }
+    }
+
+    return outputBuffer;
+}
+```
+
+I metoda na odkodowywanie, tutaj wyszło mi trochę skomplikowanie, późna godzina i mózg nie działa. W każdym razie działa:
+```js
+/**
+ * 
+ * @param {Buffer} buf 
+ * @returns 
+ */
+function uninterlate128BitBlocks(buf) {
+    if (buf.byteLength === 0) {
+        return buf;
+    }
+
+    if (buf.byteLength % 16 !== 0) {
+        throw new Error("Buffer in interlate128BitBlocks must have size that is multiple of 16 bytes!");
+    }
+
+    const bytesPerBlock = 16; // bytes per block here equals bitsPerHammingBlock
+    const blocks = buf.byteLength / bytesPerBlock;
+    const hammingBlocksPerBlock = 8;
+    const outputBuffer = Buffer.alloc(buf.byteLength);
+    // mniej wydajne pamięciowo, ale ułatwi bardzo. Zresztą cały ten protokół jest niewydajny jak cholera
+    const bits = Array.from(bufBitIterator(buf));
+    
+    for (let i = 0; i < blocks; i++) {
+        const blockBits = bits.slice(i * 128, (i + 1) * 128);
+        for(let j = hammingBlocksPerBlock - 1; j >= 0; j--) {
+            let hammingBlock = 0;
+            for (let k = 0; k < bytesPerBlock; k++) {
+                const bitPosition = 8 * k + j;
+                hammingBlock |= blockBits[bitPosition] << (bytesPerBlock - 1 - k);
+            }
+            const offset = i * bytesPerBlock + ((hammingBlocksPerBlock - 1) - j) * 2; // HUH!
+            outputBuffer.writeUint16BE(hammingBlock, offset);
+        }
+    }
+
+    return outputBuffer;
+}
+```
+
+Teraz tylko zmiana w funkcjach `parsePacket`:
+```js
+    const { decoded, valid: hammingValid } = hammingDecode(
+        uninterlate128BitBlocks(rawPacket)
+    );
+```
+Oraz `createPacket`:
+```js
+    return interlate128BitBlocks(
+        hammingEncode(packet)
+    );
+```
+
+Możemy teraz przetestować i od razu powiem, zadziała to dla zakłóceń 1%, ale dla 10% jeszcze nie.
+
+Do diabła z tym! Tyle roboty i to dalej nie działa!
+
+Spokojnie już prawie koniec!
+
+## Podział na fragmenty

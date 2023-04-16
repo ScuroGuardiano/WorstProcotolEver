@@ -1,6 +1,6 @@
 import dgram from "node:dgram";
 import crypto from "node:crypto";
-import { hammingDecode, hammingEncode } from "./hamming.mjs";
+import { bitArrayToBuf, bufBitIterator, hammingDecode, hammingEncode } from "./hamming.mjs";
 
 const PacketType = {
     MSG: 1, // wiadomość
@@ -24,7 +24,9 @@ function parsePacket(rawPacket) {
     if (rawPacket.length < 18) {
         return { valid: false }
     }
-    const { decoded, valid: hammingValid } = hammingDecode(rawPacket);
+    const { decoded, valid: hammingValid } = hammingDecode(
+        uninterlate128BitBlocks(rawPacket)
+    );
 
     const hash = decoded.subarray(0, 16);
     const paddingSize = decoded.readUint8(17);
@@ -98,8 +100,79 @@ function createPacket(type, message) {
             break;
     }
 
-    return hammingEncode(packet);
+    return interlate128BitBlocks(
+        hammingEncode(packet)
+    );
 }
+
+/**
+ * 
+ * @param {Buffer} buf 
+ */
+ function interlate128BitBlocks(buf) {
+    if (buf.byteLength === 0) {
+        return buf;
+    }
+
+    if (buf.byteLength % 16 !== 0) {
+        throw new Error("Buffer in interlate128BitBlocks must have size that is multiple of 16 bytes!");
+    }
+
+    const outputBuffer = Buffer.alloc(buf.byteLength);
+    let currentBlock = outputBuffer.subarray(0, 16);
+
+    let i = 0;
+    for(const bit of bufBitIterator(buf)) {
+        let byteNumber = i % 16;
+        let bitNumber = Math.floor(i / 16) % 8;
+        currentBlock[byteNumber] |= bit << bitNumber;
+
+        i++;
+        if (i !== 0 && i % 128 === 0) {
+            currentBlock = outputBuffer.subarray(i / 8, i / 8 + 16);
+        }
+    }
+
+    return outputBuffer;
+}
+
+/**
+ * 
+ * @param {Buffer} buf 
+ * @returns 
+ */
+function uninterlate128BitBlocks(buf) {
+    if (buf.byteLength === 0) {
+        return buf;
+    }
+
+    if (buf.byteLength % 16 !== 0) {
+        throw new Error("Buffer in interlate128BitBlocks must have size that is multiple of 16 bytes!");
+    }
+
+    const bytesPerBlock = 16; // bytes per block here equals bitsPerHammingBlock
+    const blocks = buf.byteLength / bytesPerBlock;
+    const hammingBlocksPerBlock = 8;
+    const outputBuffer = Buffer.alloc(buf.byteLength);
+    // mniej wydajne pamięciowo, ale ułatwi bardzo. Zresztą cały ten protokół jest niewydajny jak cholera
+    const bits = Array.from(bufBitIterator(buf));
+    
+    for (let i = 0; i < blocks; i++) {
+        const blockBits = bits.slice(i * 128, (i + 1) * 128);
+        for(let j = hammingBlocksPerBlock - 1; j >= 0; j--) {
+            let hammingBlock = 0;
+            for (let k = 0; k < bytesPerBlock; k++) {
+                const bitPosition = 8 * k + j;
+                hammingBlock |= blockBits[bitPosition] << (bytesPerBlock - 1 - k);
+            }
+            const offset = i * bytesPerBlock + ((hammingBlocksPerBlock - 1) - j) * 2; // HUH!
+            outputBuffer.writeUint16BE(hammingBlock, offset);
+        }
+    }
+
+    return outputBuffer;
+}
+
 
 export class WPSocket {
     sendQueue = [];

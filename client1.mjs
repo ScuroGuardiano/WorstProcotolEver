@@ -44,4 +44,6 @@ Gdzie panieńskim rumieńcem dzięcielina pała,
 A wszystko przepasane, jakby wstęgą, miedzą
 Zieloną, na niej z rzadka ciche grusze siedzą.`
 
+console.log(data.length);
+
 client.send(data, serverPort, serverHost);

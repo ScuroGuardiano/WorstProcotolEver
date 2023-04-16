@@ -7,7 +7,7 @@
 export function* bufBitIterator(buf) {
     for (let i = 0; i < buf.byteLength; i++) {
         const byte = buf.readUint8(i);
-        for (let j = 0; j < 8; j++) {
+        for (let j = 7; j >= 0; j--) {
             yield (byte >> j) & 1;
         }
     }
@@ -23,7 +23,7 @@ export function bitArrayToBuf(arr) {
     const buffer = Buffer.alloc(Math.ceil(arr.length / 8), 0);
     for (let i = 0; i < arr.length; i++) {
         const bit = arr[i];
-        buffer[Math.floor(i / 8)] = buffer[Math.floor(i / 8)] | (bit << (i % 8));
+        buffer[Math.floor(i / 8)] = buffer[Math.floor(i / 8)] | (bit << 7 - (i % 8));
     }
     return buffer;
 }
